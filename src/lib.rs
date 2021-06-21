@@ -8,8 +8,8 @@ pub use crate::converter_type::*;
 pub use crate::error::*;
 pub use crate::samplerate::*;
 use libsamplerate_sys::*;
-use std::ffi::CStr;
 use std::convert::TryInto;
+use std::ffi::CStr;
 
 #[cfg(test)]
 extern crate rstest;
@@ -20,7 +20,7 @@ mod sanity_test;
 /// Perform a simple samplerate conversion of a large chunk of audio.
 /// This calls `src_simple` of libsamplerate which is not suitable for streamed audio. Use the
 /// `Samplerate` struct instead for this.
-/// 
+///
 /// The length of `input` must be `input_frame_count * channels`.
 /// The length of result `Vec<f32>` should be `input_frames * to_rate + (from_rate - 1)) / from_rate`
 ///
@@ -37,13 +37,20 @@ mod sanity_test;
 /// let resampled = convert(44100, 48000, 1, ConverterType::SincBestQuality, &input).unwrap();
 /// assert_eq!(resampled.len(), 48000);
 /// ```
-pub fn convert(from_rate: u32, to_rate: u32, channels: usize, converter_type: ConverterType, input: &[f32]) -> Result<Vec<f32>, Error> {
+pub fn convert(
+    from_rate: u32,
+    to_rate: u32,
+    channels: usize,
+    converter_type: ConverterType,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<usize, Error> {
     let input_len = input.len();
     assert_eq!(input_len % channels, 0);
     let input_frames = input_len / channels;
     let ratio = to_rate as f64 / from_rate as f64;
-    let output_frames = (input_frames * to_rate as usize + (from_rate as usize - 1)) / from_rate as usize;
-    let mut output = vec![0f32;output_frames * channels];
+    let output_frames =
+        (input_frames * to_rate as usize + (from_rate as usize - 1)) / from_rate as usize;
     let mut src = SRC_DATA {
         data_in: input.as_ptr(),
         data_out: output.as_mut_ptr(),
@@ -55,17 +62,63 @@ pub fn convert(from_rate: u32, to_rate: u32, channels: usize, converter_type: Co
         output_frames_gen: 0,
         ..Default::default()
     };
-    let error_int = unsafe { src_simple(&mut src as *mut SRC_DATA, converter_type as i32, channels as i32) };
+    let error_int = unsafe {
+        src_simple(
+            &mut src as *mut SRC_DATA,
+            converter_type as i32,
+            channels as i32,
+        )
+    };
     let error_code = ErrorCode::from_int(error_int);
     match error_code {
-        ErrorCode::NoError => Ok(output),
+        ErrorCode::NoError => Ok(output_frames * channels),
+        _ => Err(Error::from_code(error_code)),
+    }
+}
+
+/// Better conversion function
+pub fn convert2(
+    channels: usize,
+    ratio: f64,
+    converter_type: ConverterType,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<usize, Error> {
+    let input_len = input.len();
+    assert_eq!(input_len % channels, 0);
+    let input_frames = input_len / channels;
+    let output_frames = (input_frames as f64 * ratio + 1.0) as usize;
+    assert!(output.len() >= output_frames * channels);
+    let mut src = SRC_DATA {
+        data_in: input.as_ptr(),
+        data_out: output.as_mut_ptr(),
+        input_frames: input_frames.try_into().unwrap(),
+        output_frames: output_frames.try_into().unwrap(),
+        src_ratio: ratio,
+        end_of_input: 0,
+        input_frames_used: 0,
+        output_frames_gen: 0,
+        ..Default::default()
+    };
+    let error_int = unsafe {
+        src_simple(
+            &mut src as *mut SRC_DATA,
+            converter_type as i32,
+            channels as i32,
+        )
+    };
+    let error_code = ErrorCode::from_int(error_int);
+    match error_code {
+        ErrorCode::NoError => Ok(output_frames * channels),
         _ => Err(Error::from_code(error_code)),
     }
 }
 
 /// Returns the version of `libsamplerate` used by this crate as a string.
 pub fn version() -> &'static str {
-    unsafe { CStr::from_ptr(src_get_version()) }.to_str().unwrap()
+    unsafe { CStr::from_ptr(src_get_version()) }
+        .to_str()
+        .unwrap()
 }
 
 #[cfg(test)]
@@ -74,6 +127,9 @@ mod tests {
 
     #[test]
     fn correct_version() {
-        assert_eq!(version(), "libsamplerate-0.1.9 (c) 2002-2008 Erik de Castro Lopo");
+        assert_eq!(
+            version(),
+            "libsamplerate-0.1.9 (c) 2002-2008 Erik de Castro Lopo"
+        );
     }
 }
